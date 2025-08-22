@@ -60,6 +60,7 @@
 | NAT | Network Address Translation | ネットワークアドレス変換 |
 | VGW | Virtual Private Gateway | 仮想プライベートゲートウェイ |
 | ACM | AWS Certificate Manager | SSL証明書管理サービス |
+| DX | AWS Direct Connect | 専用線接続サービス |
 
 ## 1. 基本情報
 
@@ -175,14 +176,14 @@ AWS責任共有モデルより、ハードウェア設置、構成はAWSの責�
 
 ### 4-1. ネットワーク構成概要
 
-本システムでは、Difyを使用するワークショップの参加者はインターネットからDifyの環境に接続し、参加者へのメール通知は、SMTPサーバーとAWSの専用接続により通知を行う。
+本システムでは、Difyを使用するワークショップの参加者はインターネットからDifyの環境に接続し、参加者へのメール通知は、AWS Direct Connectを経由した社内SMTPサーバーとの専用線接続により実現する。
 
 #### システム構成
 - **VPC**: カスタムVPC（プライベートクラウド環境）
 - **パブリックサブネット**: ALB配置用（2AZ）
 - **プライベートサブネット**: EC2配置用
-- **インターネット接続**:  Gateway（プライベート）
-- **社内接続**: Virtual Private Gateway（SMTP通信用）
+- **インターネット接続**: Internet Gateway（パブリック）、NAT Gateway（プライベート）
+- **社内接続**: Virtual Private Gateway + Direct Connect（SMTP通信用）
 
 ### 4-2. 主要通信要件
 
@@ -193,7 +194,7 @@ AWS責任共有モデルより、ハードウェア設置、構成はAWSの責�
 | Web通信 | 学生・講師 | ALB | HTTPS/443 | インターネット |
 | アプリ通信 | ALB | EC2 | HTTP/80 | VPC内部 |
 | AI通信 | EC2 | Bedrock | HTTPS/443 | NAT Gateway |
-| 通知メール | EC2 | 社内SMTP(10.114.2.8) | SMTP/25 | VGW |
+| 通知メール | EC2 | 社内SMTP(10.114.2.8) | SMTP/25 | VGW + Direct Connect |
 | 管理通信 | 運用者 | EC2 | Session Manager | AWS Systems Manager |
 
 ### 4-3. セキュリティ方針
@@ -220,7 +221,7 @@ AWS責任共有モデルより、ハードウェア設置、構成はAWSの責�
 | プライベートサブネット | 1 | EC2インスタンスを配置するためのネットワーク区画 |
 | インターネットゲートウェイ | 1 | ALBのインターネット接続 |
 | NAT Gateway | 1 | EC2インスタンスの外部通信 |
-| Virtual Private Gateway | 1 | 社内SMTP接続用 |
+| Virtual Private Gateway | 1 | 社内SMTP接続用（Direct Connect経由） |
 
 ネットワーク環境に関しては、弊社ネットワークサポート部によって構築済みの環境を使用する
 
@@ -252,7 +253,7 @@ AWS責任共有モデルより、ハードウェア設置、構成はAWSの責�
 | AWS Certificate Manager | ACM | リージョン依存 | SSL/TLS証明書の管理<br>HTTPS通信を可能にし、ALBに証明書を適用 |
 | Amazon Bedrock | － | リージョン依存 | 生成AI機能<br>Claude 3.7 SonnetによるAI機能 |
 | NAT Gateway | － | リージョン依存 | プライベートサブネットからの外部通信<br>Bedrock・パッケージ更新用 |
-| Virtual Private Gateway | VGW | リージョン依存 | 社内ネットワーク接続<br>SMTP通信用 |
+| Virtual Private Gateway | VGW | リージョン依存 | 社内ネットワーク接続<br>Direct Connect経由SMTP通信用 |
 
 ## 6. 障害対策
 
@@ -308,7 +309,7 @@ EC2インスタンスは単一AZ配置とし、コストを最適化する。
 | HTTPS通信 | TLS 1.2以上 | ALB - 利用者間 | ACM証明書使用 |
 | 内部通信 | HTTP | ALB - EC2間 | VPC内で隔離 |
 | AI通信 | TLS 1.2以上 | EC2 - Bedrock間 | AWS標準 |
-| SMTP通信 | SMTP | EC2 - 社内SMTP間 | VGW経由 |
+| SMTP通信 | SMTP | EC2 - 社内SMTP間 | VGW + Direct Connect経由 |
 
 #### データ暗号化
 | データ種別 | 暗号化方式 | 適用タイミング | 備考 |
