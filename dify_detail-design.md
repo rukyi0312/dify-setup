@@ -54,12 +54,15 @@
 
 | サービス名 | 技術スタック | ポート | 用途 | 備考 |
 |------------|-------------|------|------|------|
-| dify-web | React.js | 3000 | フロントエンドUI | ユーザーインターフェース |
-| dify-api | Python Flask | 5001 | バックエンドAPI | REST APIサーバー |
-| dify-worker | Python | - | バックグラウンド処理 | 非同期タスク処理 |
-| redis | Redis | 6379 | セッション・キャッシュ | インメモリデータストア |
-| postgresql | PostgreSQL | 5432 | メインデータベース | アプリケーションデータ保存 |
-| nginx | Nginx | 80 | リバースプロキシ | ロードバランサー |
+| dify-web | React.js | 3000 | フロントエンドUI | Dify公式が提供しているものを使用 |
+| dify-api | Python Flask | 5001 | バックエンドAPI | Dify公式が提供しているものを使用 |
+| dify-worker | Python | - | バックグラウンド処理 | Dify公式が提供しているものを使用 |
+| redis | Redis | 6379 | セッション・キャッシュ | Dify公式が提供しているものを使用 |
+| postgresql | PostgreSQL | 5432 | メインデータベース | Dify公式が提供しているものを使用 |
+| nginx | Nginx | 80 | リバースプロキシ | **SSL終端・ALB連携対応のため設定変更** |
+| ssrf_proxy | Squid | 3128 | アウトバウンド通信制御 | **Bedrock・SMTP通信制御のため設定変更** |
+
+> 上記のうち、nginxとssrf_proxyのみSSL終端やアウトバウンド通信要件に合わせて設定・設計を変更し、それ以外はDify公式が提供しているものを使用する。
 
 ### 1-2. ネットワーク構成詳細
 
@@ -167,17 +170,39 @@ EC2インスタンスがAWSサービスにアクセスするためのIAMロー�
 |----------|--------|--------|--------|------|
 | /dev/xvda | 30GB | gp3 | 有効 | OS・アプリケーション領域 |
 
-#### UserDataスクリプト内容
-EC2インスタンス起動時に自動実行されるスクリプトで、Dify環境構築に必要な基本ソフトウェアをインストールする。
+#### 構築手順（UserData非使用・手動構築）
 
-**実行内容**
-1. システムパッケージ更新
-2. Docker・Git インストール
-3. Docker サービス起動・自動起動設定
-4. ec2-user を docker グループに追加
-5. Docker Compose インストール
-6. CloudWatch Agent インストール
-7. アプリケーションディレクトリ作成・権限設定
+1. **EC2インスタンス起動後、Session Managerでログインする。**
+2. **以下のコマンドを順に手動実行し、Dify環境を構築する。**
+
+   ```sh
+   # システムパッケージ更新
+   sudo yum update -y
+
+   # Docker・Gitインストール
+   sudo amazon-linux-extras install docker -y
+   sudo yum install git -y
+
+   # Dockerサービス起動・自動起動設定
+   sudo systemctl start docker
+   sudo systemctl enable docker
+
+   # ec2-userをdockerグループに追加
+   sudo usermod -aG docker ec2-user
+
+   # Docker Composeインストール
+   sudo curl -L "https://github.com/docker/compose/releases/download/v2.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+   sudo chmod +x /usr/local/bin/docker-compose
+
+   # CloudWatch Agentインストール
+   sudo yum install amazon-cloudwatch-agent -y
+
+   # アプリケーションディレクトリ作成・権限設定
+   sudo mkdir -p /opt/dify
+   sudo chown ec2-user:ec2-user /opt/dify
+   ```
+
+3. **以降は「Difyアプリケーション構築フェーズ」に従い、ソース取得・環境変数設定・docker compose起動等を手動で実施する。**
 
 ### 2-4. ネットワークリソース詳細設計
 
@@ -307,6 +332,8 @@ CloudFormationで作成されたEC2インスタンスにSession Managerで接続
 **AWS Bedrock設定**
 - AWS_REGION: ap-northeast-1
 - BEDROCK_MODEL: anthropic.claude-3-sonnet-20240229-v1:0
+- HTTP_PROXY: http://ssrf_proxy:3128
+- HTTPS_PROXY: http://ssrf_proxy:3128
 
 **セキュリティ設定**
 - SECRET_KEY: workshop_secret_key_2025_dify
@@ -318,6 +345,7 @@ CloudFormationで作成されたEC2インスタンスにSession Managerで接続
 - SMTP_SERVER: 10.114.2.8
 - SMTP_PORT: 25
 - SMTP_USE_TLS: false
+- SMTP_PROXY: http://ssrf_proxy:3128
 
 **機能フラグ**
 - ENABLE_SIGNUP: true
@@ -334,45 +362,16 @@ CloudFormationで作成されたEC2インスタンスにSession Managerで接続
 
 **Docker Composeサービス構成**
 
-**APIサービス (api)**
-- イメージ: langgenius/dify-api:0.6.13
-- モード: api
-- 依存関係: db, redis
-- ボリューム: ./volumes/app/storage:/app/storage
-- 環境変数: 全Dify設定項目
+- Dify公式が提供しているdocker-compose.ymlをベースとし、**nginx**と**ssrf_proxy**サービスのみ以下の通りカスタマイズする。
 
-**ワーカーサービス (worker)**
-- イメージ: langgenius/dify-api:0.6.13
-- モード: worker
-- 依存関係: db, redis
-- ボリューム: ./volumes/app/storage:/app/storage
-- 環境変数: データベース・Redis・AWS設定
+**Nginxサービス (nginx) の主な変更点**
+- ALB連携・SSL終端対応のため、リバースプロキシ設定をALBのX-Forwarded-*ヘッダー信頼・ヘルスチェック対応に変更
+- サーバー名・最大ボディサイズ・アップストリーム設定等をワークショップ要件に合わせて調整
 
-**Webサービス (web)**
-- イメージ: langgenius/dify-web:0.6.13
-- 環境変数: CONSOLE_API_URL, APP_API_URL
-- ネットワーク: dify-network
-
-**データベースサービス (db)**
-- イメージ: postgres:15-alpine
-- 環境変数: POSTGRES_PASSWORD, POSTGRES_DB, PGDATA
-- ボリューム: ./volumes/db/data:/var/lib/postgresql/data
-
-**Redisサービス (redis)**
-- イメージ: redis:6-alpine
-- コマンド: redis-server --requirepass ${REDIS_PASSWORD}
-- ボリューム: ./volumes/redis/data:/data
-
-**Nginxサービス (nginx)**
-- イメージ: nginx:alpine
-- ポート: 80:80
-- 設定ファイル: ./nginx/nginx.conf, ./nginx/conf.d
-- 依存関係: api, web
-- ネットワーク: dify-network
-
-**ネットワーク・ボリューム設定**
-- ネットワーク: dify-network (bridge driver)
-- ボリューム: db_data, redis_data, app_storage
+**SSRF Proxyサービス (ssrf_proxy) の主な変更点**
+- Bedrock・SMTP通信のみ許可するようsquid.confをカスタマイズ
+- 必要なアウトバウンド先（Bedrock, 社内SMTP）以外はdeny設定
+- DX/VGW経由ルーティングに対応
 
 #### Step 4: Nginx設定
 
@@ -380,6 +379,7 @@ CloudFormationで作成されたEC2インスタンスにSession Managerで接続
 - リッスンポート: 80
 - サーバー名: _（全てのホスト名）
 - 最大ボディサイズ: 15MB
+- プロキシ信頼設定: ALBのIPレンジを信頼、X-Forwarded-*ヘッダー処理
 
 **アップストリーム設定**
 - api: server api:5001
@@ -406,7 +406,7 @@ CloudFormationで作成されたEC2インスタンスにSession Managerで接続
 - プロキシ先: http://web
 - ヘッダー: Host, X-Real-IP, X-Forwarded-For, X-Forwarded-Proto
 
-### 2-3. 起動・初期設定フェーズ
+## 2-3. 起動・初期設定フェーズ
 
 #### Step 1: アプリケーション起動
 
@@ -443,8 +443,8 @@ DifyアプリケーションのDocker Compose構成を起動し、各コンテ�
 | Web通信 | Nginx | dify-web | TCP/3000 | Docker内 | フロントエンド | コンテナ間通信 |
 | DB通信 | dify-api | PostgreSQL | TCP/5432 | Docker内 | データベース接続 | コンテナ間通信 |
 | Cache通信 | dify-api | Redis | TCP/6379 | Docker内 | キャッシュ・セッション | コンテナ間通信 |
-| AI通信 | EC2 | Bedrock | HTTPS/443 | NAT Gateway | AI機能呼び出し | 既存NAT使用 |
-| メール通信 | EC2 | 社内SMTP(10.114.2.8) | SMTP/25 | VGW + Direct Connect | 通知メール送信 | 既存接続使用 |
+| AI通信 | EC2 | Bedrock | HTTPS/443 | ssrf_proxy → NAT Gateway | AI機能呼び出し | プロキシ経由で制御 |
+| メール通信 | EC2 | 社内SMTP(10.114.2.8) | SMTP/25 | ssrf_proxy → VGW + Direct Connect | 通知メール送信 | プロキシ経由で制御 |
 | 管理通信 | 運用者 | EC2 | Session Manager | AWS Systems Manager | サーバー管理 | IAMロール必須 |
 
 ### 3-2. セキュリティグループ詳細
@@ -461,8 +461,10 @@ DifyアプリケーションのDocker Compose構成を起動し、各コンテ�
 - TCP/80: ALBからのHTTPアクセス（sg-existing-alb）
 
 **アウトバウンドルール**
-- TCP/443: Bedrock向けHTTPS通信（0.0.0.0/0）
-- TCP/25: 社内メールサーバー向けSMTP（10.114.2.8/32）
+- TCP/3128: ssrf_proxyコンテナへのプロキシ通信
+- TCP/443: Bedrock向けHTTPS通信（ssrf_proxy経由）
+- TCP/25: 社内メールサーバー向けSMTP（ssrf_proxy経由）
+- TCP/80: パッケージ更新用HTTP通信
 
 ### 3-3. 既存ネットワーク環境利用
 
