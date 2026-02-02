@@ -1,0 +1,129 @@
+#=========================================================================
+#AWSTemplateFormatVersion
+#=========================================================================
+AWSTemplateFormatVersion: 2010-09-09
+
+#=========================================================================
+#Description
+#=========================================================================
+Description: listenerrule-an1-internal01-dev-dify202508
+
+#=========================================================================
+#CommonParam:Parameters
+#=========================================================================
+Parameters:
+  #Enviroments
+  EnvId:
+    Type: String
+  CompanyName:
+    Type: String
+  SystemId:
+    Type: String
+  DOMAINNAME:
+    Type: String
+  RegionABBR:
+    Type: String
+  #Networking
+  VpcId:
+    Type: String
+  VpcABBR:
+    Type: String
+  Port:
+    Type: Number
+    Default: 80
+  HttpCode:
+    Type: String
+  PathPattern:
+    Type: String
+    Default: "*"
+
+#=========================================================================
+#Resources
+#=========================================================================
+Resources:
+  # ターゲットグループ
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckProtocol: HTTP
+      Matcher: 
+        HttpCode: "200"
+      HealthCheckPath: "/console/api/ping"
+      HealthCheckPort: !Ref Port
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      HealthCheckTimeoutSeconds: 5
+      HealthCheckIntervalSeconds: 30
+      IpAddressType: ipv4
+      TargetType: instance
+      Name: !Sub "${SystemId}-${EnvId}-tg"
+      Protocol: HTTP
+      Port: !Ref Port
+      VpcId: !Sub "${VpcId}"
+      ProtocolVersion: HTTP1
+      Targets:
+      - Id: "i-079ef31398cfa0bc5" 
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: true
+        - Key: stickiness.type
+          Value: lb_cookie
+        - Key: stickiness.lb_cookie.duration_seconds
+          Value: 86400
+  
+  #ListenerRule
+  ListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - !Sub "${DOMAINNAME}"
+        # - Field: http-header
+        #   HttpHeaderConfig:
+        #     HttpHeaderName: from-restriction-cloudfront
+        #     Values: 
+        #       - cf-po-header
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - "/*"
+      ListenerArn:  {"Fn::ImportValue": !Sub "reverseproxy-${EnvId}-fealb-listener-arn"}
+      Priority: 100
+  
+  # ListenerRule2:
+  #   Type: AWS::ElasticLoadBalancingV2::ListenerRule
+  #   Properties:
+  #     Actions:
+  #       - Type: forward
+  #         TargetGroupArn: !Ref TargetGroup
+  #     Conditions:
+  #       # - Field: host-header
+  #       #   HostHeaderConfig:
+  #       #     Values:
+  #       #       - !Sub "${DOMAINNAME}"
+  #       - Field: http-header
+  #         HttpHeaderConfig:
+  #           HttpHeaderName: from-restriction-cloudfront
+  #           Values: 
+  #             - cf-po-header
+  #       - Field: path-pattern
+  #         PathPatternConfig:
+  #           Values:
+  #             - "/*"
+  #     ListenerArn: arn:aws:elasticloadbalancing:ap-northeast-1:381492049212:listener/app/reverseproxy-prod-fealb/32d4163e9715e018/1e440b7e336edd84
+  #     Priority: 200
+
+#=========================================================================
+#Outputs
+#=========================================================================
+Outputs:
+  TargetGroupArn:
+    Description: TargetGroup
+    Value: !Ref TargetGroup
+    Export:
+      Name: !Sub "tg-${RegionABBR}-${VpcABBR}-${EnvId}-${CompanyName}-${SystemId}"

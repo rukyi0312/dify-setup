@@ -1,0 +1,274 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  EnvId:
+    Description: An environment ID that is prefixed to resource names
+    Type: String
+
+  CompanyName:
+    Type: String
+    Default: suzuyo
+
+  SystemId:
+    Type: String
+    Default: dify202508
+
+  RegionABBR:
+    Type: String
+    Default: an1
+
+  VpcABBR:
+    Type: String
+    Default: internal01
+
+  InstanceId:
+    Description: EC2 Instance ID (if not using import)
+    Type: String
+    Default: ""
+
+  TargetGroupArn:
+    Description: Target Group ARN (if not using import)
+    Type: String
+    Default: ""
+
+  AutoStart:
+    Description: Enable auto start feature
+    Type: String
+    AllowedValues: 
+      - "true"
+      - "false"
+    Default: "false"
+
+Conditions:
+  IsAutoStartEnabled: !Equals 
+    - !Ref AutoStart
+    - "true"
+  UseInstanceIdParam: !Not [!Equals [!Ref InstanceId, ""]]
+  UseTargetGroupParam: !Not [!Equals [!Ref TargetGroupArn, ""]]
+
+Resources:
+######################
+#EC2 PowerManagement
+######################
+  # Lambda関数にアクセス権を与えるIAMロール
+  LambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      # ロールを引き受けるためのポリシー
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - lambda.amazonaws.com
+          Action:
+            - sts:AssumeRole
+      # 組み込みポリシーを指定して、Lambda関数に必要なアクセス権を付与
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+        - arn:aws:iam::aws:policy/ElasticLoadBalancingFullAccess
+      Policies:
+        # CloudWatch
+        - PolicyName: write-cloudwatchlogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              # ロググループを作らない場合は、権限を与えて自動で作るようにする。
+              # - Effect: Allow
+              #   Action: 'logs:CreateLogGroup'
+              #   Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+              - Effect: Allow
+                Action: 
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${SystemId}/${EnvId}/*:*"    
+
+  # EC2インスタンスを停止するためのLambda関数
+  LambdaFunctionEC2InstanceStop:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "stop-${SystemId}-${EnvId}-webapp-ec2-instance"
+      # Lambda関数のコード
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import time
+
+          def lambda_handler(event, context):
+              # 環境変数から値を取得
+              instance_id = os.environ['INSTANCE_ID']
+              target_group_arn = os.environ['TARGET_GROUP_ARN']
+
+              # クライアントオブジェクトを作成
+              ec2_client = boto3.client('ec2')
+              elbv2_client = boto3.client('elbv2')
+
+              # EC2インスタンスの状態を取得
+              response = ec2_client.describe_instances(InstanceIds=[instance_id])
+              state = response['Reservations'][0]['Instances'][0]['State']['Name']
+
+              if state == 'running':
+                  # ターゲットグループから除外
+                  try:
+                      elbv2_client.deregister_targets(
+                          TargetGroupArn=target_group_arn,
+                          Targets=[{'Id': instance_id}]
+                      )
+                      print(f'Deregistered instance {instance_id} from target group')
+                      
+                      # 除外完了まで待機
+                      time.sleep(30)
+                  except Exception as e:
+                      print(f'Error deregistering target: {e}')
+                  
+                  # EC2インスタンスを停止
+                  ec2_client.stop_instances(InstanceIds=[instance_id])
+                  print('Stopped EC2 instance: {}'.format(instance_id))
+                  return {
+                      'statusCode': 200,
+                      'body': 'Stopped EC2 instance successfully'
+                  }
+              else:
+                  print('EC2 instance is not running')
+                  return {
+                      'statusCode': 200,
+                      'body': 'EC2 instance is not running'
+                  }
+      # Lambda関数の環境変数
+      Environment:
+        Variables:
+          INSTANCE_ID: !If 
+            - UseInstanceIdParam
+            - !Ref InstanceId
+            - {"Fn::ImportValue": !Sub "${SystemId}-${EnvId}-instance-id"}
+          TARGET_GROUP_ARN: !If 
+            - UseTargetGroupParam
+            - !Ref TargetGroupArn
+            - {"Fn::ImportValue": !Sub "tg-${RegionABBR}-${VpcABBR}-${EnvId}-${CompanyName}-${SystemId}"}
+      # Lambda関数のハンドラ
+      Handler: index.lambda_handler
+      # Lambda関数にアクセス権を与えるIAMロール
+      Role: !GetAtt LambdaFunctionRole.Arn
+      # Lambda関数のランタイム
+      Runtime: python3.11
+
+  # AWS EventBridgeルール
+  EventBridgeRuleEC2InstanceStop:
+    Type: AWS::Events::Rule
+    Properties:
+      # ルールの説明
+      Name: !Sub "stop-${SystemId}-${EnvId}-webapp-ec2-instance"
+      ScheduleExpression: 'cron(0 1 ? * MON-FRI *)'
+      Description: 'Stop EC2 instances using EventBridge'
+      # ルールのターゲット
+      Targets:
+        - Id: 'FunctionEC2InstanceStop'
+          Arn: !GetAtt LambdaFunctionEC2InstanceStop.Arn
+
+  PermissionEventBridgeRuleEC2InstanceStop:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "stop-${SystemId}-${EnvId}-webapp-ec2-instance"
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventBridgeRuleEC2InstanceStop.Arn
+
+  # EC2インスタンスを起動するためのLambda関数
+  LambdaFunctionEC2InstanceStart:
+    Type: AWS::Lambda::Function
+    Condition: IsAutoStartEnabled
+    Properties:
+      FunctionName: !Sub "start-${SystemId}-${EnvId}-webapp-ec2-instance"
+      # Lambda関数のコード
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          
+          def lambda_handler(event, context):
+              # 環境変数から値を取得
+              instance_id = os.environ['INSTANCE_ID']
+              target_group_arn = os.environ['TARGET_GROUP_ARN']
+          
+              # クライアントオブジェクトを作成
+              ec2_client = boto3.client('ec2')
+              elbv2_client = boto3.client('elbv2')
+          
+              # EC2インスタンスの状態を取得
+              response = ec2_client.describe_instances(InstanceIds=[instance_id])
+              state = response['Reservations'][0]['Instances'][0]['State']['Name']
+              print(f'Current state: {state}')
+              
+              if state == 'stopped':
+                  # EC2インスタンスを起動
+                  ec2_client.start_instances(InstanceIds=[instance_id])
+                  print('Started EC2 instance: {}'.format(instance_id))
+                  
+                  # 起動完了まで待機
+                  waiter = ec2_client.get_waiter('instance_running')
+                  waiter.wait(InstanceIds=[instance_id])
+                  print('EC2 instance is now running')
+                  
+                  # ターゲットグループに登録
+                  try:
+                      elbv2_client.register_targets(
+                          TargetGroupArn=target_group_arn,
+                          Targets=[{'Id': instance_id}]
+                      )
+                      print(f'Registered instance {instance_id} to target group')
+                  except Exception as e:
+                      print(f'Error registering target: {e}')
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': 'Started EC2 instance successfully'
+                  }
+              else:
+                  print('EC2 instance is already running')
+                  return {
+                      'statusCode': 200,
+                      'body': 'EC2 instance is already running'
+                  }
+      # Lambda関数の環境変数
+      Environment:
+        Variables:
+          INSTANCE_ID: !If 
+            - UseInstanceIdParam
+            - !Ref InstanceId
+            - {"Fn::ImportValue": !Sub "${SystemId}-${EnvId}-instance-id"}
+          TARGET_GROUP_ARN: !If 
+            - UseTargetGroupParam
+            - !Ref TargetGroupArn
+            - {"Fn::ImportValue": !Sub "tg-${RegionABBR}-${VpcABBR}-${EnvId}-${CompanyName}-${SystemId}"}
+      # Lambda関数のハンドラ
+      Handler: index.lambda_handler
+      # Lambda関数にアクセス権を与えるIAMロール
+      Role: !GetAtt LambdaFunctionRole.Arn
+      # Lambda関数のランタイム
+      Runtime: python3.11
+
+  # AWS EventBridgeルール
+  EventBridgeRuleEC2InstanceStart:
+    Type: AWS::Events::Rule
+    Condition: IsAutoStartEnabled
+    Properties:
+      # ルールの説明
+      Name: !Sub "start-${SystemId}-${EnvId}-webapp-ec2-instance"
+      ScheduleExpression: 'cron(00 00 ? * MON-FRI *)'
+      Description: 'Start EC2 instances using EventBridge'
+      # ルールのターゲット
+      Targets:
+        - Id: 'FunctionEC2InstanceStart'
+          Arn: !GetAtt LambdaFunctionEC2InstanceStart.Arn
+
+  PermissionEventBridgeRuleEC2InstanceStart:
+    Type: AWS::Lambda::Permission
+    Condition: IsAutoStartEnabled
+    Properties:
+      FunctionName: !Sub "start-${SystemId}-${EnvId}-webapp-ec2-instance"
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventBridgeRuleEC2InstanceStart.Arn

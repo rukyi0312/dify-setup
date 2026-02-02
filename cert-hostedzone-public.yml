@@ -1,0 +1,45 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: cert-hostedzone-public
+
+#=========================================================================
+#CommonParam:Parameters
+#=========================================================================
+Parameters:
+  # Enviroments
+  AppId:
+    Description: An application ID that is prefixed to resource names
+    Type: String
+
+  EnvId:
+    Description: An environment ID that is prefixed to resource names
+    Type: String
+
+  DOMAINNAME:
+    Type: String
+
+  HostedZoneId:
+    Type: String
+
+#=========================================================================
+#Resources
+#=========================================================================
+Resources:
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Sub "${DOMAINNAME}"
+      DomainValidationOptions:
+        - DomainName: !Sub "${DOMAINNAME}"
+          HostedZoneId: !Sub "${HostedZoneId}"
+      SubjectAlternativeNames:
+        - !Sub "*.${DOMAINNAME}"
+      ValidationMethod: DNS
+
+#=========================================================================
+#Export:Outputs
+#=========================================================================
+Outputs:
+  Certificate:
+    Value: !Ref Certificate
+    Export:
+      Name: !Sub "${AppId}-${EnvId}-cert-hostedzone-public"

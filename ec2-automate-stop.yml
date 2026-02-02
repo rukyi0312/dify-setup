@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  SystemId:
+    Type: String
+    Default: dify202508
+
+  EnvId:
+    Type: String
+
+  InstanceId:
+    Description: EC2 Instance ID
+    Type: String
+
+  TargetGroupArn:
+    Description: Target Group ARN
+    Type: String
+
+  StopTime:
+    Description: Stop time in cron format (UTC)
+    Type: String
+    Default: 'cron(00 9 ? * MON-FRI *)'
+
+Resources:
+  # EC2インスタンスを停止するためのLambda関数
+  LambdaFunctionEC2InstanceStop:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "stop-${SystemId}-${EnvId}-webapp-ec2-instance"
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import time
+
+          def lambda_handler(event, context):
+              instance_id = os.environ['INSTANCE_ID']
+              target_group_arn = os.environ['TARGET_GROUP_ARN']
+
+              ec2_client = boto3.client('ec2')
+              elbv2_client = boto3.client('elbv2')
+
+              response = ec2_client.describe_instances(InstanceIds=[instance_id])
+              state = response['Reservations'][0]['Instances'][0]['State']['Name']
+
+              if state == 'running':
+                  try:
+                      elbv2_client.deregister_targets(
+                          TargetGroupArn=target_group_arn,
+                          Targets=[{'Id': instance_id}]
+                      )
+                      print(f'Deregistered instance {instance_id} from target group')
+                      time.sleep(30)
+                  except Exception as e:
+                      print(f'Error deregistering target: {e}')
+                  
+                  ec2_client.stop_instances(InstanceIds=[instance_id])
+                  print('Stopped EC2 instance: {}'.format(instance_id))
+                  return {
+                      'statusCode': 200,
+                      'body': 'Stopped EC2 instance successfully'
+                  }
+              else:
+                  print('EC2 instance is not running')
+                  return {
+                      'statusCode': 200,
+                      'body': 'EC2 instance is not running'
+                  }
+      Environment:
+        Variables:
+          INSTANCE_ID: !Ref InstanceId
+          TARGET_GROUP_ARN: !Ref TargetGroupArn
+      Handler: index.lambda_handler
+      Role: {"Fn::ImportValue": !Sub "${SystemId}-${EnvId}-lambda-role-arn"}
+      Runtime: python3.11
+      Timeout: 60
+
+  # AWS EventBridgeルール
+  EventBridgeRuleEC2InstanceStop:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "stop-${SystemId}-${EnvId}-webapp-ec2-instance"
+      ScheduleExpression: !Ref StopTime
+      Description: 'Stop EC2 instances using EventBridge'
+      Targets:
+        - Id: 'FunctionEC2InstanceStop'
+          Arn: !GetAtt LambdaFunctionEC2InstanceStop.Arn
+
+  PermissionEventBridgeRuleEC2InstanceStop:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub "stop-${SystemId}-${EnvId}-webapp-ec2-instance"
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventBridgeRuleEC2InstanceStop.Arn

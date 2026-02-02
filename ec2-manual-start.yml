@@ -1,0 +1,139 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  SystemId:
+    Type: String
+    Default: dify202508
+
+  EnvId:
+    Type: String
+
+  InstanceId:
+    Description: EC2 Instance ID
+    Type: String
+
+  TargetGroupArn:
+    Description: Target Group ARN
+    Type: String
+
+Resources:
+  # EC2インスタンスを手動起動するためのLambda関数
+  LambdaFunctionEC2InstanceManualStart:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "manual-start-${SystemId}-${EnvId}-webapp-ec2-instance"
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          
+          def lambda_handler(event, context):
+              instance_id = os.environ['INSTANCE_ID']
+              target_group_arn = os.environ['TARGET_GROUP_ARN']
+          
+              ec2_client = boto3.client('ec2')
+              elbv2_client = boto3.client('elbv2')
+          
+              # EC2インスタンスの状態を取得
+              response = ec2_client.describe_instances(InstanceIds=[instance_id])
+              state = response['Reservations'][0]['Instances'][0]['State']['Name']
+              print(f'Current EC2 state: {state}')
+              
+              if state == 'stopped':
+                  # EC2インスタンスを起動
+                  ec2_client.start_instances(InstanceIds=[instance_id])
+                  print(f'Started EC2 instance: {instance_id}')
+                  
+                  # 起動完了まで待機
+                  print('Waiting for instance to be running...')
+                  waiter = ec2_client.get_waiter('instance_running')
+                  waiter.wait(InstanceIds=[instance_id])
+                  print('EC2 instance is now running')
+                  
+                  # ターゲットグループに登録
+                  try:
+                      elbv2_client.register_targets(
+                          TargetGroupArn=target_group_arn,
+                          Targets=[{'Id': instance_id}]
+                      )
+                      print(f'Registered instance {instance_id} to target group')
+                      
+                      # ヘルスチェック状態を確認
+                      print('Checking target health...')
+                      health_response = elbv2_client.describe_target_health(
+                          TargetGroupArn=target_group_arn,
+                          Targets=[{'Id': instance_id}]
+                      )
+                      health_state = health_response['TargetHealthDescriptions'][0]['TargetHealth']['State']
+                      print(f'Target health state: {health_state}')
+                      
+                  except Exception as e:
+                      print(f'Error registering target: {e}')
+                      return {
+                          'statusCode': 500,
+                          'body': f'Error registering target: {e}'
+                      }
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': 'Started EC2 instance and registered to target group successfully'
+                  }
+              elif state == 'running':
+                  # 既に起動している場合、ターゲットグループの状態を確認
+                  try:
+                      health_response = elbv2_client.describe_target_health(
+                          TargetGroupArn=target_group_arn,
+                          Targets=[{'Id': instance_id}]
+                      )
+                      health_state = health_response['TargetHealthDescriptions'][0]['TargetHealth']['State']
+                      print(f'EC2 is running, target health state: {health_state}')
+                      
+                      if health_state in ['draining', 'unused']:
+                          # ターゲットグループに再登録
+                          elbv2_client.register_targets(
+                              TargetGroupArn=target_group_arn,
+                              Targets=[{'Id': instance_id}]
+                          )
+                          print(f'Re-registered instance {instance_id} to target group')
+                          
+                  except Exception as e:
+                      print(f'Target not found in target group, registering: {e}')
+                      # ターゲットグループに登録
+                      elbv2_client.register_targets(
+                          TargetGroupArn=target_group_arn,
+                          Targets=[{'Id': instance_id}]
+                      )
+                      print(f'Registered instance {instance_id} to target group')
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': 'EC2 instance is already running and registered to target group'
+                  }
+              else:
+                  print(f'EC2 instance is in {state} state, cannot start')
+                  return {
+                      'statusCode': 400,
+                      'body': f'EC2 instance is in {state} state, cannot start'
+                  }
+      Environment:
+        Variables:
+          INSTANCE_ID: !Ref InstanceId
+          TARGET_GROUP_ARN: !Ref TargetGroupArn
+      Handler: index.lambda_handler
+      Role: {"Fn::ImportValue": !Sub "${SystemId}-${EnvId}-lambda-role-arn"}
+      Runtime: python3.11
+      Timeout: 300
+      Description: Manual start function for EC2 instance with ALB target group registration
+
+Outputs:
+  LambdaFunctionName:
+    Description: Lambda Function Name for manual execution
+    Value: !Ref LambdaFunctionEC2InstanceManualStart
+    Export:
+      Name: !Sub "${SystemId}-${EnvId}-manual-start-function-name"
+  
+  LambdaFunctionArn:
+    Description: Lambda Function ARN for manual execution
+    Value: !GetAtt LambdaFunctionEC2InstanceManualStart.Arn
+    Export:
+      Name: !Sub "${SystemId}-${EnvId}-manual-start-function-arn"

@@ -1,0 +1,176 @@
+#=========================================================================
+#AWSTemplateFormatVersion
+#=========================================================================
+AWSTemplateFormatVersion: "2010-09-09"
+#=========================================================================
+#Description
+#=========================================================================
+Description: ApplicationLoadBalancer-dify202508
+#=========================================================================
+#CommonParam:Parameters
+#=========================================================================
+Parameters:
+  # Enviroments
+  AppId:
+    Description: An application ID that is prefixed to resource names
+    Type: String
+    Default: reverseproxy
+  EnvId:
+    Description: An environment ID that is prefixed to resource names
+    Type: String
+    Default: dev
+  # Networking
+  VpcId:
+    Description: Base Network
+    Type: String
+  Subnet01Id:
+    Description: Front Application Load Blancer Subnets
+    Type: String
+  Subnet02Id:  
+    Description: Front Application Load Blancer
+    Type: String
+  # Common Application Settings
+  FrontAlbHttpPort:
+    Description: Front Application Load Blancer
+    Type: String
+    Default: 443
+  SSLCertificateArn:
+    Type: String
+    Description: ACM Certificate ARN from separate stack
+ 
+  SSLPolicy:
+    Description: SSL Policy for HTTPS Listener
+    Type: String
+    Default: ELBSecurityPolicy-TLS13-1-2-Res-2021-06
+    AllowedValues:
+      - ELBSecurityPolicy-TLS13-1-2-Res-2021-06      # 最推奨
+      - ELBSecurityPolicy-TLS13-1-2-2021-06          # バランス型
+      - ELBSecurityPolicy-TLS13-1-3-2021-06          # TLS1.3のみ
+      - ELBSecurityPolicy-FS-1-2-Res-2020-10         # Forward Secrecy
+      - ELBSecurityPolicy-TLS-1-2-2017-01            # 互換性重視
+#=========================================================================
+#Resources
+#=========================================================================
+Resources:
+  #----------------------------------------------------------#
+  # Security Group
+  #----------------------------------------------------------#
+  ApplicationLoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for Fealb"
+      GroupName: !Sub "${AppId}-${EnvId}-fealb-sg"
+      VpcId: !Sub "${VpcId}"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Sub "${FrontAlbHttpPort}"
+          ToPort: !Sub "${FrontAlbHttpPort}"
+          CidrIp: 0.0.0.0/0
+        # - IpProtocol: tcp
+        #   FromPort: 80
+        #   ToPort: 80
+        #   CidrIp: 0.0.0.0/0
+  #----------------------------------------------------------#
+  # Frontend ALB
+  #----------------------------------------------------------#
+  FeAlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${AppId}-${EnvId}-fealb"
+      Scheme: internet-facing
+      Subnets:
+        - !Sub "${Subnet01Id}"
+        - !Sub "${Subnet02Id}"
+      SecurityGroups:
+        - !Ref ApplicationLoadBalancerSecurityGroup
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: 300
+        - Key: access_logs.s3.enabled
+          Value: true
+        - Key: access_logs.s3.bucket
+          Value: !Ref S3Bucket
+        - Key: routing.http2.enabled
+          Value: false
+    DependsOn: S3BucketPolicy
+  FeAlbHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Port: !Sub "${FrontAlbHttpPort}"
+      Protocol: HTTPS
+      SslPolicy: !Ref SSLPolicy
+      Certificates:
+        - CertificateArn: {"Fn::ImportValue": !Sub "${AppId}-${EnvId}-cert-hostedzone-public"}
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            ContentType: text/plain
+            MessageBody: ""
+            StatusCode: 503
+      LoadBalancerArn: !Ref FeAlb
+  # FeAlbHttpListener2:
+  #   Type: AWS::ElasticLoadBalancingV2::Listener
+  #   Properties:
+  #     Port: 80
+  #     Protocol: HTTP
+  #     DefaultActions:
+  #       - Type: fixed-response
+  #         FixedResponseConfig:
+  #           ContentType: text/plain
+  #           MessageBody: ""
+  #           StatusCode: 503
+  #     LoadBalancerArn: !Ref FeAlb
+# ALBのログを出力するためのS3
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: TRUE
+        BlockPublicPolicy: TRUE
+        IgnorePublicAcls: TRUE
+        RestrictPublicBuckets: TRUE
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowALBLogging
+            Effect: Allow
+            Principal:
+              # 582318560864はAWSからの指定
+              # https://docs.aws.amazon.com/ja_jp/elasticloadbalancing/latest/application/enable-access-logging.html
+              AWS: arn:aws:iam::582318560864:root
+            Action: s3:PutObject
+            Resource: !Sub "arn:aws:s3:::${S3Bucket}/AWSLogs/${AWS::AccountId}/*"
+            # Resource: !Sub "arn:aws:s3:::${S3Bucket}/accesslog/AWSLogs/*"
+#=========================================================================
+#Outputs
+#=========================================================================
+Outputs:
+  ApplicationLoadBalancerSecurityGroup:
+    Description: A reference to the ID of webapp ECS security group
+    Value: !Ref ApplicationLoadBalancerSecurityGroup
+    Export:
+      Name: !Sub "${AppId}-${EnvId}-alb-sg-id"
+  FeAlbDNSName:
+    Description: A reference to the DNS name of common ALB
+    Value: !GetAtt FeAlb.DNSName
+    Export:
+      Name: !Sub "${AppId}-${EnvId}-fealb-dns-name"
+  FeAlbHttpListener:
+    Description: A reference to the DNS name of common ALB
+    Value: !Ref FeAlbHttpListener
+    Export:
+      Name: !Sub "${AppId}-${EnvId}-fealb-listener-arn"
+  FeAlbArn:
+    Description: A reference to common ALB
+    Value: !Ref FeAlb
+    Export:
+      Name: !Sub "${AppId}-${EnvId}-fealb"
+  SSLPolicy:
+    Description: SSL Policy used for HTTPS Listener
+    Value: !Ref SSLPolicy
+    Export:
+      Name: !Sub "${AppId}-${EnvId}-ssl-policy"

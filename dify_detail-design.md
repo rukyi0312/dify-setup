@@ -163,7 +163,7 @@ EC2インスタンスがAWSサービスにアクセスするためのIAMロー�
 | サブネット | 既存プライベートサブネット | セキュリティ確保、既存環境利用 |
 | セキュリティグループ | DifyWorkshopSecurityGroup | 専用SG、最小権限通信 |
 | IAMインスタンスプロファイル | DifyWorkshopInstanceProfile | 必要最小権限のロール |
-| キーペア | 指定なし | Session Manager使用のため不要 |
+| キーペア | dify-workshop-key | SSHログイン用。管理者アクセスのため指定 |
 
 #### ストレージ設計
 | デバイス | サイズ | タイプ | 暗号化 | 用途 |
@@ -173,6 +173,8 @@ EC2インスタンスがAWSサービスにアクセスするためのIAMロー�
 #### 構築手順（UserData非使用・手動構築）
 
 1. **EC2インスタンス起動後、Session Managerでログインする。**
+    - または、管理者は指定したSSHキーペア（dify-workshop-key）を用いてSSH接続が可能。
+       - 例: `ssh -i ~/.ssh/dify-workshop-key.pem ec2-user@<EC2のプライベートIP>`
 2. **以下のコマンドを順に手動実行し、Dify環境を構築する。**
 
    ```sh
@@ -211,7 +213,8 @@ EC2インスタンスがAWSサービスにアクセスするためのIAMロー�
 **DifyWorkshopSecurityGroup（EC2用）**
 - 目的: EC2インスタンスの通信制御
 - インバウンドルール:
-  - TCP/80: ALBSecurityGroupからのHTTP通信のみ許可
+   - TCP/80: ALBSecurityGroupからのHTTP通信のみ許可
+   - TCP/22: 管理者の接続元IPからのSSHアクセスを許可（管理者SSH用）
 - アウトバウンドルール:
   - TCP/443: 全てのIPアドレスへのHTTPS通信（Bedrock API用）
   - TCP/25: 社内SMTPサーバー（10.114.2.8）へのSMTP通信
@@ -233,6 +236,9 @@ EC2インスタンスがAWSサービスにアクセスするためのIAMロー�
 | IPアドレスタイプ | ipv4 | IPv4のみ対応 |
 | サブネット | 既存パブリックサブネット（2AZ） | 高可用性確保 |
 | セキュリティグループ | ALBSecurityGroup | 専用SG適用 |
+| アクセスログ出力 | 有効（S3バケット） | アクセス監査・トラブルシュート用 |
+| S3バケット名 | dify-alb-accesslog-2025 | ログ保存先 |
+| ログ出力プレフィックス | alb/ | ログファイルの格納パス |
 
 **リスナー設定**
 1. **HTTPSリスナー（ポート443）**
@@ -268,10 +274,14 @@ EC2インスタンスがAWSサービスにアクセスするためのIAMロー�
 **DifySSLCertificate設定**
 | 項目 | 設定値 | 理由 |
 |------|--------|------|
-| ドメイン名 | dify-workshop-{Environment}.sst-web.com | 環境別ドメイン |
-| 検証方法 | DNS検証 | 自動検証、管理容易 |
+| ドメイン名 | 20250918-dify.sst-cloudmng.com | ワークショップ専用サブドメイン |
+| 検証方法 | DNS検証 | Route53で`s‍st-cloudmng.com`配下にサブドメインを設定し、ACMで自動検証 |
 | 証明書タイプ | RSA-2048 | 標準的なセキュリティレベル |
 | 自動更新 | 有効 | ACMによる自動更新 |
+
+**DNS構成**
+- Route53にて`s‍st-cloudmng.com`を親ドメインとし、`20250918-dify.sst-cloudmng.com`をサブドメインとして登録。
+- ALBのDNS名に対してCNAMEレコードを設定し、外部アクセスを可能とする。
 
 ### 2-5. CloudFormationパラメータ設計
 
@@ -283,6 +293,7 @@ EC2インスタンスがAWSサービスにアクセスするためのIAMロー�
 | ExistingVPCId | AWS::EC2::VPC::Id | - | 既存VPC ID（ネットワークサポート部管理） |
 | ExistingPrivateSubnetId | AWS::EC2::Subnet::Id | - | EC2配置用既存プライベートサブネット ID |
 | ExistingPublicSubnetIds | List<AWS::EC2::Subnet::Id> | - | ALB配置用既存パブリックサブネット ID（2AZ） |
+| DomainName | String | 20250918-dify.sst-cloudmng.com | 利用するFQDN（Route53で管理） |
 
 #### 出力値設計
 | 出力キー | 説明 | エクスポート名 | 用途 |
@@ -930,3 +941,85 @@ DifyアプリケーションのDocker Compose構成を起動し、各コンテ�
 - [Amazon Bedrock User Guide](https://docs.aws.amazon.com/bedrock/)
 - [Docker Compose Documentation](https://docs.docker.com/compose/)
 - [AWS CloudWatch User Guide](https://docs.aws.amazon.com/cloudwatch/)
+## 8. Difyデーモン化設定
+
+### 8-1. 運用パターン（9時-18時）
+```bash
+朝9時: EC2起動 → Dify自動起動 ✅
+夕方18時: EC2停止 → Dify正常停止 ✅
+翌朝9時: EC2起動 → Dify自動起動 ✅
+```
+
+### 8-2. systemdサービスファイル作成
+```bash
+# サービスファイルを作成
+sudo nano /etc/systemd/system/dify.service
+```
+
+ファイル内容:
+```ini
+[Unit]
+Description=Dify Docker Compose Application
+Documentation=https://github.com/langgenius/dify
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/ec2-user/dify/docker
+ExecStart=/usr/local/bin/docker-compose up -d
+ExecStop=/usr/local/bin/docker-compose down
+ExecReload=/usr/local/bin/docker-compose restart
+TimeoutStartSec=300
+TimeoutStopSec=120
+User=ec2-user
+Group=ec2-user
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### 8-3. restart policy設定
+docker-compose.yamlの各サービスに以下が設定済み:
+```yaml
+services:
+  api:
+    restart: unless-stopped
+  worker:
+    restart: unless-stopped
+  web:
+    restart: unless-stopped
+  db:
+    restart: unless-stopped
+  redis:
+    restart: unless-stopped
+  # その他のサービスも同様
+```
+
+### 8-4. systemdサービス有効化
+```bash
+# systemd再読み込み
+sudo systemctl daemon-reload
+
+# サービス有効化（起動時自動実行）
+sudo systemctl enable dify.service
+
+# サービス開始
+sudo systemctl start dify.service
+```
+
+### 8-5. 動作確認コマンド
+```bash
+# サービス状態確認
+sudo systemctl status dify.service
+
+# ログ確認
+sudo journalctl -u dify.service -f
+
+# 手動停止/開始
+sudo systemctl stop dify.service
+sudo systemctl start dify.service
+```

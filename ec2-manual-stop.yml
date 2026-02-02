@@ -1,0 +1,107 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  SystemId:
+    Type: String
+    Default: dify202508
+
+  EnvId:
+    Type: String
+
+  InstanceId:
+    Description: EC2 Instance ID
+    Type: String
+
+  TargetGroupArn:
+    Description: Target Group ARN
+    Type: String
+
+Resources:
+  # EC2インスタンスを手動停止するためのLambda関数
+  LambdaFunctionEC2InstanceManualStop:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "manual-stop-${SystemId}-${EnvId}-webapp-ec2-instance"
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          
+          def lambda_handler(event, context):
+              instance_id = os.environ['INSTANCE_ID']
+              target_group_arn = os.environ['TARGET_GROUP_ARN']
+          
+              ec2_client = boto3.client('ec2')
+              elbv2_client = boto3.client('elbv2')
+          
+              # EC2インスタンスの状態を取得
+              response = ec2_client.describe_instances(InstanceIds=[instance_id])
+              state = response['Reservations'][0]['Instances'][0]['State']['Name']
+              print(f'Current EC2 state: {state}')
+              
+              if state == 'running':
+                  # ターゲットグループから登録解除
+                  try:
+                      elbv2_client.deregister_targets(
+                          TargetGroupArn=target_group_arn,
+                          Targets=[{'Id': instance_id}]
+                      )
+                      print(f'Deregistered instance {instance_id} from target group')
+                      
+                      # 登録解除状態を確認
+                      health_response = elbv2_client.describe_target_health(
+                          TargetGroupArn=target_group_arn,
+                          Targets=[{'Id': instance_id}]
+                      )
+                      health_state = health_response['TargetHealthDescriptions'][0]['TargetHealth']['State']
+                      print(f'Target health state after deregistration: {health_state}')
+                      
+                  except Exception as e:
+                      print(f'Error deregistering target: {e}')
+                      return {
+                          'statusCode': 500,
+                          'body': f'Failed to deregister from target group: {e}. EC2 stop cancelled for safety.'
+                      }
+                  
+                  # EC2インスタンスを停止
+                  ec2_client.stop_instances(InstanceIds=[instance_id])
+                  print(f'EC2 instance stop initiated: {instance_id}')
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': 'Deregistered from target group and initiated EC2 instance stop successfully'
+                  }
+              elif state == 'stopped':
+                  print('EC2 instance is already stopped')
+                  return {
+                      'statusCode': 200,
+                      'body': 'EC2 instance is already stopped'
+                  }
+              else:
+                  print(f'EC2 instance is in {state} state, cannot stop')
+                  return {
+                      'statusCode': 400,
+                      'body': f'EC2 instance is in {state} state, cannot stop'
+                  }
+      Environment:
+        Variables:
+          INSTANCE_ID: !Ref InstanceId
+          TARGET_GROUP_ARN: !Ref TargetGroupArn
+      Handler: index.lambda_handler
+      Role: {"Fn::ImportValue": !Sub "${SystemId}-${EnvId}-lambda-role-arn"}
+      Runtime: python3.11
+      Timeout: 300
+      Description: Manual stop function for EC2 instance with ALB target group deregistration
+
+Outputs:
+  LambdaFunctionName:
+    Description: Lambda Function Name for manual execution
+    Value: !Ref LambdaFunctionEC2InstanceManualStop
+    Export:
+      Name: !Sub "${SystemId}-${EnvId}-manual-stop-function-name"
+  
+  LambdaFunctionArn:
+    Description: Lambda Function ARN for manual execution
+    Value: !GetAtt LambdaFunctionEC2InstanceManualStop.Arn
+    Export:
+      Name: !Sub "${SystemId}-${EnvId}-manual-stop-function-arn"

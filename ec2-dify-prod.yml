@@ -1,0 +1,173 @@
+#=========================================================================
+#AWSTemplateFormatVersion
+#=========================================================================
+AWSTemplateFormatVersion: 2010-09-09
+
+#=========================================================================
+#Description
+#=========================================================================
+Description: EC2-cmalb-dev-202509
+
+#=========================================================================
+#Parameters
+#=========================================================================
+Parameters:
+  #Environments
+  EnvId:
+    Type: String
+    Default: dev
+  CompanyName:
+    Type: String
+    Default: suzuyo
+  SystemId:
+    Type: String
+
+  RegionABBR:
+    Type: String
+    Default: an1
+  
+  #Networking
+  VpcId:
+    Type: String
+    
+  SubnetId:
+    Type: String
+    
+  
+  #EC2 Settings
+  InstanceType:
+    Type: String
+    Default: t3.large
+  AMIId:
+    Type: String
+    Default: ami-011bdd6d8e8705a3c
+  
+  KeyPairName:
+    Type: String
+    Default: 202509-cmalb
+    Description: EC2 Key Pair name (must exist in the region)
+  
+
+#=========================================================================
+#Resources
+#=========================================================================
+Resources:
+  #----------------------------------------------------------#
+  # IAM Role for EC2
+  #----------------------------------------------------------#
+  DifyEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${SystemId}-${EnvId}-ec2-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: CloudWatchLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: 
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*"
+
+  DifyInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "${SystemId}-${EnvId}-instance-profile"
+      Roles:
+        - !Ref DifyEC2Role
+
+  #----------------------------------------------------------#
+  # Security Group for EC2
+  #----------------------------------------------------------#
+  DifyEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${SystemId}-${EnvId}-ec2-sg"
+      GroupDescription: Security Group for Dify EC2 instance
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.4.29.34/32
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.4.16.0/20
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 10.239.102.0/23
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  #----------------------------------------------------------#
+  # EC2 Instance
+  #----------------------------------------------------------#
+  DifyEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AMIId
+      KeyName: !Ref KeyPairName
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref DifyEC2SecurityGroup
+      IamInstanceProfile: !Ref DifyInstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemId}-${EnvId}-instance"
+        - Key: Environment
+          Value: !Ref EnvId
+        - Key: System
+          Value: !Ref SystemId
+        - Key: Company
+          Value: !Ref CompanyName
+
+#=========================================================================
+#Outputs
+#=========================================================================
+Outputs:
+  EC2InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref DifyEC2Instance
+    Export:
+      Name: !Sub "${SystemId}-${EnvId}-instance-id"
+  
+  EC2PrivateIP:
+    Description: EC2 Private IP Address
+    Value: !GetAtt DifyEC2Instance.PrivateIp
+    Export:
+      Name: !Sub "${SystemId}-${EnvId}-private-ip"
+  
+  SecurityGroupId:
+    Description: EC2 Security Group ID
+    Value: !Ref DifyEC2SecurityGroup
+    Export:
+      Name: !Sub "${SystemId}-${EnvId}-ec2-sg-id"

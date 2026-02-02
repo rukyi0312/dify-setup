@@ -1,0 +1,46 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  SystemId:
+    Type: String
+    Default: dify202508
+
+  EnvId:
+    Type: String
+
+Resources:
+  # Lambda関数にアクセス権を与えるIAMロール
+  LambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${SystemId}-${EnvId}-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - lambda.amazonaws.com
+          Action:
+            - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+        - arn:aws:iam::aws:policy/ElasticLoadBalancingFullAccess
+      Policies:
+        - PolicyName: write-cloudwatchlogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${SystemId}/${EnvId}/*:*"
+
+Outputs:
+  LambdaRoleArn:
+    Description: Lambda Function Role ARN
+    Value: !GetAtt LambdaFunctionRole.Arn
+    Export:
+      Name: !Sub "${SystemId}-${EnvId}-lambda-role-arn"

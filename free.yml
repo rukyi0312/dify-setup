@@ -1,0 +1,110 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFront Distribution with VPC Origin
+
+#=========================================================================
+#CommonParam:Parameters
+#=========================================================================
+Parameters:
+  EC2InstanceArn:
+    Description: ARN of the EC2 instance to use as origin
+    Type: String
+    Default: arn:aws:ec2:ap-northeast-1:381492049212:instance/i-079ef31398cfa0bc5
+  
+  EC2PrivateDNS:
+    Description: Private DNS name of the EC2 instance
+    Type: String
+    Default: ip-10-148-14-17.ap-northeast-1.compute.internal
+
+#=========================================================================
+#Resources
+#=========================================================================
+Resources:
+  # VPC Origin ????EC2?HTTP???
+  VPCOrigin:
+    Type: AWS::CloudFront::VpcOrigin
+    Properties:
+      VpcOriginEndpointConfig:
+        Arn: !Ref EC2InstanceArn
+        Name: !Sub '${AWS::StackName}-vpc-origin'
+        HTTPPort: 80
+        OriginProtocolPolicy: http-only
+  
+  Distribution: 
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        PriceClass: PriceClass_200
+        Enabled: true
+        Origins:
+          - Id: VpcOrigin
+            DomainName: !Ref EC2PrivateDNS
+            # VpcOriginConfig??????CustomOriginConfig????
+            VpcOriginConfig:
+              VpcOriginId: !GetAtt VPCOrigin.Id
+              OriginKeepaliveTimeout: 5
+              OriginReadTimeout: 30
+            ConnectionAttempts: 3
+            ConnectionTimeout: 10
+        
+        DefaultCacheBehavior:
+          TargetOriginId: VpcOrigin
+          # ?????????????CachingDisabled?
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          # ??????????????????AllViewer?
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          Compress: true
+        
+        # ?????????????????????????
+        CustomErrorResponses:
+          - ErrorCode: 502  # Bad Gateway
+            ErrorCachingMinTTL: 10
+          - ErrorCode: 503  # Service Unavailable
+            ErrorCachingMinTTL: 10
+          - ErrorCode: 504  # Gateway Timeout
+            ErrorCachingMinTTL: 10
+        
+        # ????????
+        HttpVersion: http2and3  # HTTP/2?HTTP/3?????
+        IPV6Enabled: true       # IPv6????
+        
+        # ??????????????CloudFront????????
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+          MinimumProtocolVersion: TLSv1.2_2021
+        
+        Comment: !Sub 'CloudFront Distribution with VPC Origin for ${AWS::StackName}'
+      
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-distribution'
+
+#=========================================================================
+#Outputs
+#=========================================================================
+Outputs:
+  CloudFrontDistributionId:
+    Description: CloudFront Distribution ID
+    Value: !Ref Distribution
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFront-DistributionId'
+  
+  CloudFrontDomainName:
+    Description: CloudFront Distribution Domain Name
+    Value: !GetAtt Distribution.DomainName
+    Export:
+      Name: !Sub '${AWS::StackName}-CloudFront-DomainName'
+  
+  VPCOriginId:
+    Description: VPC Origin ID
+    Value: !GetAtt VPCOrigin.Id
+    Export:
+      Name: !Sub '${AWS::StackName}-VPC-Origin-Id'

@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+#=========================================================================
+#CommonParam:Parameters
+#=========================================================================
+Parameters:
+  DOMAINNAME:
+    Description: Front Application Load Balancer 
+    Type: String
+    Default: 20250918-dify.sst-cloudmng.com
+
+
+#=========================================================================
+#Resources
+#=========================================================================
+Resources:
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        PriceClass: PriceClass_200
+        Enabled: true
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+        Origins:
+          - Id: ALBOrigin
+            DomainName: !Sub "${DOMAINNAME}"
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 60
+        DefaultRootObject: index.html
+        DefaultCacheBehavior:
+          TargetOriginId: ALBOrigin
+          ForwardedValues:
+            QueryString: 'true'
+            Cookies: 
+              Forward: all
+          ViewerProtocolPolicy: redirect-to-https
+          DefaultTTL: 0
+          MinTTL: 0
+          MaxTTL: 0
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          LambdaFunctionAssociations: []
+          FunctionAssociations:
+            - EventType: viewer-response
+              FunctionARN: !GetAtt 302LocationOverride.FunctionARN
+          SmoothStreaming: false
+      Tags: []
+
+  302LocationOverride:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: '302LocationOverride'
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Overrides 302/307/308 redirect locations for specific domain only
+        Runtime: cloudfront-js-2.0
+      FunctionCode: !Sub |
+        function handler(event) {
+          const response = event.response;
+          const statusCode = response.statusCode;
+          
+          if (statusCode === 302 || statusCode === 307 || statusCode === 308) {
+            const request = event.request;
+            const host = request.headers.host.value;
+            const redirectUrl = response.headers.location.value;
+            
+            if (redirectUrl.includes('://')) {
+              const url = new URL(redirectUrl);
+              
+              // 特定のドメイン（ALBドメイン）の場合のみ書き換え
+              if (url.hostname === '${DOMAINNAME}') {
+                url.hostname = host;
+                response.headers.location = { value: url.toString() };
+              }
+            }
+          }
+          
+          return response;
+        }
+
+#=========================================================================
+#Outputs
+#=========================================================================
+Outputs:
+  CloudFrontDistributionId:
+    Description: CloudFront Distribution ID
+    Value: !Ref Distribution
+    Export:
+      Name: CloudFront-DistributionId
+
+  CloudFrontDomainName:
+    Description: CloudFront Distribution Domain Name
+    Value: !GetAtt Distribution.DomainName
+    Export:
+      Name: CloudFront-DomainName
+
+  CloudFrontFunctionName:
+    Description: CloudFront Function Name
+    Value: !Ref 302LocationOverride
+    Export:
+      Name: CloudFront-FunctionName

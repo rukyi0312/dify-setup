@@ -1,0 +1,46 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Public HostedZone
+
+#=========================================================================
+#CommonParam:Parameters
+#=========================================================================
+Parameters:
+  # --Local Params---------------
+  AppId:
+    Type: String
+
+  EnvId:
+    Type: String
+
+  DOMAINNAME:
+    Type: String
+
+#=========================================================================
+#Resources
+#=========================================================================
+Resources:
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Sub "${DOMAINNAME}"
+
+  # Aレコード（エイリアス）- ALBへのルーティング
+  AliasRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Sub "${DOMAINNAME}"
+      Type: A
+      AliasTarget:
+        DNSName: {"Fn::ImportValue": "reverseproxy-prod-fealb-dns-name"}
+        HostedZoneId: Z14GRHDCWA56QT  # ALB用のHostedZoneID (ap-northeast-1)
+        EvaluateTargetHealth: false
+
+#=========================================================================
+#Export:Outputs
+#=========================================================================
+Outputs:
+  HostedZone:
+    Value: !Ref HostedZone
+    Export:
+      Name: !Sub "${AppId}-${EnvId}-hostedzone-public"
